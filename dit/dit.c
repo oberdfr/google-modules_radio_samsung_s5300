@@ -19,8 +19,7 @@
 #include <soc/google/exynos-cpupm.h>
 #endif
 
-#include "modem_utils.h"
-#include "dit.h"
+#include "dit_common.h"
 #include "dit_net.h"
 #include "dit_hal.h"
 
@@ -112,16 +111,10 @@ static bool dit_hw_capa_matched(u32 mask)
 
 static void dit_print_dump(enum dit_direction dir, u32 dump_bits)
 {
-	struct dit_desc_info *desc_info;
-	struct dit_src_desc *src_desc = NULL;
-	struct dit_dst_desc *dst_desc = NULL;
-	struct nat_local_port local_port;
-	u16 reply_port_dst, reply_port_dst_h, reply_port_dst_l;
-	u16 origin_port_src;
 	u16 ring_num;
 	u32 i;
 
-	if (dump_bits & BIT(DIT_DUMP_SNAPSHOT_BIT)) {
+	if (cpif_check_bit(dump_bits, DIT_DUMP_SNAPSHOT_BIT)) {
 		mif_err("---- SNAPSHOT[dir:%d] ----\n", dir);
 		for (ring_num = 0; ring_num < DIT_DESC_RING_MAX; ring_num++) {
 			pr_info("%s head:%d,tail:%d\n", snapshot[dir][ring_num].name,
@@ -129,16 +122,18 @@ static void dit_print_dump(enum dit_direction dir, u32 dump_bits)
 		}
 	}
 
-	if (dump_bits & BIT(DIT_DUMP_DESC_BIT)) {
-		desc_info = &dc->desc_info[dir];
+	if (cpif_check_bit(dump_bits, DIT_DUMP_DESC_BIT)) {
+		struct dit_desc_info *desc_info = &dc->desc_info[dir];
+		struct dit_src_desc *src_desc = NULL;
+		struct dit_dst_desc *dst_desc = NULL;
 
+		src_desc = desc_info->src_desc_ring;
 		mif_err("---- SRC RING[dir:%d] wp:%u,rp:%u ----\n", dir,
 			desc_info->src_wp, desc_info->src_rp);
-		src_desc = desc_info->src_desc_ring;
 		for (i = 0; i < desc_info->src_desc_ring_len; i++) {
 			if (!(src_desc[i].control & DIT_SRC_KICK_CONTROL_MASK))
 				continue;
-			pr_info("src[%06d] ctrl:0x%02X,stat:0x%02X,ch_id:%02u\n",
+			pr_info("src[%06d] ctrl:0x%02X,stat:0x%02X,ch_id:%03u\n",
 				i, src_desc[i].control, src_desc[i].status, src_desc[i].ch_id);
 		}
 
@@ -156,7 +151,11 @@ static void dit_print_dump(enum dit_direction dir, u32 dump_bits)
 		}
 	}
 
-	if ((dump_bits & BIT(DIT_DUMP_PORT_TABLE_BIT)) && (dir == DIT_DIR_RX)) {
+	if (cpif_check_bit(dump_bits, DIT_DUMP_PORT_TABLE_BIT) && dir == DIT_DIR_RX) {
+		struct nat_local_port local_port;
+		u16 reply_port_dst, reply_port_dst_h, reply_port_dst_l;
+		u16 origin_port_src;
+
 		mif_err("---- PORT TABLE[dir:%d] ----\n", dir);
 		for (i = 0; i < DIT_REG_NAT_LOCAL_PORT_MAX; i++) {
 			local_port.hw_val = READ_REG_VALUE(dc, DIT_REG_NAT_RX_PORT_TABLE_SLOT +
@@ -185,7 +184,7 @@ static void dit_print_dump(enum dit_direction dir, u32 dump_bits)
 	}
 }
 
-static bool dit_is_kicked_any(void)
+bool dit_is_kicked_any(void)
 {
 	unsigned int dir;
 
@@ -290,7 +289,7 @@ static void dit_debug_out_of_order(enum dit_direction dir, enum dit_desc_ring ri
 }
 #endif
 
-static int dit_check_dst_ready(enum dit_direction dir, enum dit_desc_ring ring_num)
+int dit_check_dst_ready(enum dit_direction dir, enum dit_desc_ring ring_num)
 {
 	struct dit_desc_info *desc_info;
 
@@ -320,6 +319,22 @@ static int dit_check_dst_ready(enum dit_direction dir, enum dit_desc_ring ring_n
 	}
 
 	return 0;
+}
+
+static inline bool dit_check_queues_empty(enum dit_direction dir)
+{
+	struct dit_desc_info *desc_info = &dc->desc_info[dir];
+	unsigned int ring_num;
+
+	if (!circ_empty(desc_info->src_wp, desc_info->src_rp))
+		return false;
+
+	for (ring_num = DIT_DST_DESC_RING_0; ring_num < DIT_DST_DESC_RING_MAX; ring_num++) {
+		if (!circ_empty(desc_info->dst_wp[ring_num], desc_info->dst_rp[ring_num]))
+			return false;
+	}
+
+	return true;
 }
 
 static bool dit_is_reg_value_valid(u32 value, u32 offset)
@@ -435,8 +450,8 @@ static inline void dit_set_skb_checksum(struct dit_dst_desc *dst_desc,
 	if (dst_desc->status & DIT_CHECKSUM_FAILED_STATUS_MASK)
 		return;
 
-	if ((dst_desc->status & BIT(DIT_DESC_S_TCPC)) &&
-			(dst_desc->status & BIT(DIT_DESC_S_IPCS)))
+	if (cpif_check_bit(dst_desc->status, DIT_DESC_S_TCPC) &&
+	    cpif_check_bit(dst_desc->status, DIT_DESC_S_IPCS))
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
 }
 
@@ -449,17 +464,21 @@ static inline void dit_set_skb_udp_csum_zero(struct dit_dst_desc *dst_desc,
 	if (ring_num == DIT_DST_DESC_RING_0)
 		return;
 
-	if (!dst_desc->udp_csum_zero)
+	/* every packets on DST1/2 are IPv4 NATed */
+	if (!cpif_check_bit(dst_desc->packet_info, DIT_PACKET_INFO_IPV4_BIT) ||
+	    !cpif_check_bit(dst_desc->packet_info, DIT_PACKET_INFO_UDP_BIT))
 		return;
 
-	/* it must be IPv4 */
-	off = sizeof(struct ethhdr);
-	if ((*(skb->data + off) & 0xFF) != 0x45)
-		return;
-
-	off += sizeof(struct iphdr);
+	off = sizeof(struct ethhdr) + sizeof(struct iphdr);
 	uh = (struct udphdr *)(skb->data + off);
-	uh->check = 0;
+
+	/* set to 0 if csum was 0 from SRC.
+	 * set to CSUM_MANGLED_0 if csum is 0 after the hw csum magic.
+	 */
+	if (dst_desc->udp_csum_zero)
+		uh->check = 0;
+	else if (!uh->check)
+		uh->check = CSUM_MANGLED_0;
 }
 
 static int dit_pass_to_net(enum dit_desc_ring ring_num,
@@ -512,29 +531,6 @@ static inline void dit_reset_src_desc_kick_control(struct dit_src_desc *src_desc
 	src_desc->control &= ~mask;
 }
 
-static inline void dit_set_src_desc_filter_bypass(
-	struct dit_src_desc *src_desc, bool bypass)
-{
-	/* LRO start/end bit can be used for filter bypass
-	 * 1/1: filtered
-	 * 0/0: filter bypass
-	 * dit does not support checksum yet
-	 */
-	u8 mask = (BIT(DIT_DESC_C_END) | BIT(DIT_DESC_C_START));
-
-#if defined(DIT_DEBUG_LOW)
-	if (dc->force_bypass == 1)
-		bypass = true;
-	else if (dc->force_bypass == 2)
-		bypass = false;
-#endif
-
-	if (bypass)
-		src_desc->control &= ~mask;
-	else
-		src_desc->control |= mask;
-}
-
 static inline void dit_set_src_desc_udp_csum_zero(struct dit_src_desc *src_desc,
 		u8 *src)
 {
@@ -576,7 +572,7 @@ static void dit_set_src_desc_kick_range(enum dit_direction dir, unsigned int src
 	/* set current kick */
 	head = src_rp;
 	src_desc = &desc_info->src_desc_ring[head];
-	src_desc->control |= BIT(DIT_DESC_C_HEAD);
+	cpif_set_bit(src_desc->control, DIT_DESC_C_HEAD);
 	p_desc = virt_to_phys(src_desc);
 
 	if (dir == DIT_DIR_TX) {
@@ -595,11 +591,11 @@ static void dit_set_src_desc_kick_range(enum dit_direction dir, unsigned int src
 
 	tail = circ_prev_ptr(desc_info->src_desc_ring_len, src_wp, 1);
 	src_desc = &desc_info->src_desc_ring[tail];
-	src_desc->control |= BIT(DIT_DESC_C_TAIL);
-	src_desc->control |= BIT(DIT_DESC_C_INT);
+	cpif_set_bit(src_desc->control, DIT_DESC_C_TAIL);
+	cpif_set_bit(src_desc->control, DIT_DESC_C_INT);
 
 	src_desc = &desc_info->src_desc_ring[desc_info->src_desc_ring_len - 1];
-	src_desc->control |= BIT(DIT_DESC_C_RINGEND);
+	cpif_set_bit(src_desc->control, DIT_DESC_C_RINGEND);
 
 	dit_set_snapshot(dir, DIT_SRC_DESC_RING, head, tail,
 		circ_get_usage(desc_info->src_desc_ring_len, tail, head) + 1);
@@ -653,21 +649,20 @@ static void dit_set_dst_desc_int_range(enum dit_direction dir,
 	if (offset_lo && offset_hi && (desc_info->dst_desc_ring_len > 0)) {
 		WRITE_REG_PADDR_LO(dc, p_desc, offset_lo);
 		WRITE_REG_PADDR_HI(dc, p_desc, offset_hi);
-		dst_desc[desc_info->dst_desc_ring_len - 1].control |= BIT(DIT_DESC_C_RINGEND);
+		cpif_set_bit(dst_desc[desc_info->dst_desc_ring_len - 1].control,
+			     DIT_DESC_C_RINGEND);
 	}
 }
 
 static int dit_enqueue_src_desc_ring_internal(enum dit_direction dir,
 		u8 *src, unsigned long src_paddr,
-		u16 len, u16 ch_id, bool csum)
+		u16 len, u8 ch_id, bool csum)
 {
 	struct dit_desc_info *desc_info;
 	struct dit_src_desc *src_desc;
 	int remain;
-	struct net_device *upstream_netdev;
-	struct io_device *iod;
 	int src_wp = 0;
-	bool filter_bypass = true;
+	bool is_upstream_pkt = false;
 #if defined(DIT_DEBUG)
 	static unsigned int overflow;
 	static unsigned int last_max_overflow;
@@ -709,40 +704,17 @@ static int dit_enqueue_src_desc_ring_internal(enum dit_direction dir,
 	else
 		src_desc->src_addr = virt_to_phys(src);
 	src_desc->length = len;
-	src_desc->ch_id = (ch_id & 0x1F);
+	src_desc->ch_id = ch_id;
 	src_desc->pre_csum = csum;
 	src_desc->udp_csum_zero = 0;
 	src_desc->control = 0;
 	if (src_wp == (desc_info->src_desc_ring_len - 1))
-		src_desc->control |= BIT(DIT_DESC_C_RINGEND);
+		cpif_set_bit(src_desc->control, DIT_DESC_C_RINGEND);
 	src_desc->status = 0;
 
-	do {
-		if (dir != DIT_DIR_RX)
-			break;
-		/*
-		 * check ipv6 for clat.
-		 * port table does not have entries for tun device or ipv6.
-		 * every ipv6 packets from any rmnet can see port table.
-		 */
-		if ((src[0] & 0xF0) == 0x60) {
-			filter_bypass = false;
-			break;
-		}
-
-		/* check upstream netdev */
-		upstream_netdev = dit_hal_get_dst_netdev(DIT_DST_DESC_RING_0);
-		if (upstream_netdev) {
-			iod = link_get_iod_with_channel(dc->ld, ch_id);
-			if (iod && (upstream_netdev == iod->ndev)) {
-				dit_set_src_desc_udp_csum_zero(src_desc, src);
-				filter_bypass = false;
-				break;
-			}
-		}
-	} while (0);
-
-	dit_set_src_desc_filter_bypass(src_desc, filter_bypass);
+	DIT_INDIRECT_CALL(dc, set_desc_filter_bypass, dir, src_desc, src, &is_upstream_pkt);
+	if (is_upstream_pkt)
+		dit_set_src_desc_udp_csum_zero(src_desc, src);
 
 	barrier();
 
@@ -762,7 +734,7 @@ static int dit_enqueue_src_desc_ring_internal(enum dit_direction dir,
 
 int dit_enqueue_src_desc_ring(enum dit_direction dir,
 		u8 *src, unsigned long src_paddr,
-		u16 len, u16 ch_id, bool csum)
+		u16 len, u8 ch_id, bool csum)
 {
 	return dit_enqueue_src_desc_ring_internal(
 		dir, src, src_paddr, len, ch_id, csum);
@@ -860,7 +832,8 @@ static int dit_fill_rx_dst_data_buffer(enum dit_desc_ring ring_num, unsigned int
 			if (ring_num == DIT_DST_DESC_RING_0)
 				gfp_mask = GFP_ATOMIC;
 
-			dst_skb[dst_rp_pos] = __netdev_alloc_skb(dc->netdev, buf_size, gfp_mask);
+			dst_skb[dst_rp_pos] = __netdev_alloc_skb_ip_align(dc->netdev,
+									  buf_size, gfp_mask);
 		} else
 			dst_skb[dst_rp_pos] = napi_alloc_skb(&dc->napi, buf_size);
 
@@ -1017,8 +990,8 @@ int dit_read_rx_dst_poll(struct napi_struct *napi, int budget)
 			skbpriv(skb)->napi = napi;
 
 			/* clat */
-			if ((dst_desc->packet_info & BIT(DIT_PACKET_INFO_IPV6_BIT)) &&
-					((skb->data[0] & 0xFF) == 0x45)) {
+			if (cpif_check_bit(dst_desc->packet_info, DIT_PACKET_INFO_IPV6_BIT) &&
+			    ((skb->data[0] & 0xFF) == 0x45)) {
 				skbpriv(skb)->rx_clat = 1;
 				snapshot[DIT_DIR_RX][ring_num].clat_packets++;
 			}
@@ -1026,22 +999,23 @@ int dit_read_rx_dst_poll(struct napi_struct *napi, int budget)
 			/* hw checksum */
 			dit_set_skb_checksum(dst_desc, ring_num, skb);
 
-			/* reset udp checksum if it was 0 */
+			/* adjust udp zero checksum */
 			dit_set_skb_udp_csum_zero(dst_desc, ring_num, skb);
 
 			dst_desc->packet_info = 0;
+			dst_desc->control = 0;
 			dst_desc->status = 0;
 
-			rcvd_total++;
+			ret = dit_pass_to_net(ring_num, skb);
 
-			/* update dst rp */
+			/* update dst rp after dit_pass_to_net */
 			desc_info->dst_rp[ring_num] = circ_new_ptr(desc_info->dst_desc_ring_len,
 				desc_info->dst_rp[ring_num], 1);
-
+			rcvd_total++;
 #if defined(DIT_DEBUG_LOW)
 			snapshot[DIT_DIR_RX][ring_num].alloc_skbs--;
 #endif
-			ret = dit_pass_to_net(ring_num, skb);
+
 			if (ret < 0)
 				break;
 		}
@@ -1083,11 +1057,11 @@ static void dit_update_dst_desc_pos(enum dit_direction dir, enum dit_desc_ring r
 
 	do {
 		dst_desc = &desc_info->dst_desc_ring[ring_num][desc_info->dst_wp[ring_num]];
-		if (!(dst_desc->status & BIT(DIT_DESC_S_DONE)))
+		if (!cpif_check_bit(dst_desc->status, DIT_DESC_S_DONE))
 			break;
 
 		/* update dst */
-		dst_desc->status &= ~BIT(DIT_DESC_S_DONE);
+		cpif_clear_bit(dst_desc->status, DIT_DESC_S_DONE);
 		/* tx does not use status field */
 		if (dir == DIT_DIR_TX)
 			dst_desc->status = 0;
@@ -1110,7 +1084,7 @@ static void dit_update_dst_desc_pos(enum dit_direction dir, enum dit_desc_ring r
 
 #if defined(DIT_DEBUG)
 		if (desc_info->dst_wp[ring_num] == desc_info->dst_rp[ring_num]) {
-			mif_err("dst[%d] wp[%d] would overwrite rp (dir:%d)", ring_num,
+			mif_err("dst[%d] wp[%d] would overwrite rp (dir:%d)\n", ring_num,
 				desc_info->dst_wp[ring_num], dir);
 		}
 #endif
@@ -1160,12 +1134,26 @@ irqreturn_t dit_irq_handler(int irq, void *arg)
 
 	switch (pending_bit) {
 	case RX_DST0_INT_PENDING_BIT:
+	case TX_DST0_INT_PENDING_BIT:
+		ring_num = DIT_DST_DESC_RING_0;
+		break;
+	case RX_DST1_INT_PENDING_BIT:
+		ring_num = DIT_DST_DESC_RING_1;
+		break;
+	case RX_DST2_INT_PENDING_BIT:
+		ring_num = DIT_DST_DESC_RING_2;
+		break;
+	default:
+		break;
+	}
+
+	switch (pending_bit) {
+	case RX_DST0_INT_PENDING_BIT:
 	case RX_DST1_INT_PENDING_BIT:
 	case RX_DST2_INT_PENDING_BIT:
 		dir = DIT_DIR_RX;
 		pending_mask = DIT_RX_INT_PENDING_MASK;
 
-		ring_num = (enum dit_desc_ring)(pending_bit - RX_DST0_INT_PENDING_BIT);
 		dit_update_dst_desc_pos(DIT_DIR_RX, ring_num);
 		if (napi_schedule_prep(&dc->napi))
 			__napi_schedule(&dc->napi);
@@ -1173,14 +1161,14 @@ irqreturn_t dit_irq_handler(int irq, void *arg)
 	case TX_DST0_INT_PENDING_BIT:
 		dir = DIT_DIR_TX;
 		pending_mask = DIT_TX_INT_PENDING_MASK;
-
 		mld = ld_to_mem_link_device(dc->ld);
-		dit_update_dst_desc_pos(DIT_DIR_TX, DIT_DST_DESC_RING_0);
+
+		dit_update_dst_desc_pos(DIT_DIR_TX, ring_num);
 		send_ipc_irq(mld, mask2int(MASK_SEND_DATA));
 		break;
 	case ERR_INT_PENDING_BIT:
 		/* nothing to do when ERR interrupt */
-		mif_err_limited("ERR interrupt!! int_pending: 0x%X",
+		mif_err_limited("ERR interrupt!! int_pending: 0x%X\n",
 			READ_REG_VALUE(dc, DIT_REG_INT_PENDING));
 		break;
 	default:
@@ -1212,7 +1200,7 @@ irqreturn_t dit_irq_handler(int irq, void *arg)
 	return IRQ_HANDLED;
 }
 
-static bool dit_is_busy(enum dit_direction dir)
+bool dit_is_busy(enum dit_direction dir)
 {
 	u32 status_bits = 0;
 	u32 status_mask = 0;
@@ -1300,10 +1288,10 @@ int dit_kick(enum dit_direction dir, bool retry)
 
 	switch (dir) {
 	case DIT_DIR_TX:
-		kick_mask = BIT(TX_COMMAND_BIT);
+		cpif_set_bit(kick_mask, TX_COMMAND_BIT);
 		break;
 	case DIT_DIR_RX:
-		kick_mask = BIT(RX_COMMAND_BIT);
+		cpif_set_bit(kick_mask, RX_COMMAND_BIT);
 		break;
 	default:
 		break;
@@ -1327,139 +1315,6 @@ exit:
 	return 0;
 }
 EXPORT_SYMBOL(dit_kick);
-
-static bool dit_check_nat_enabled(void)
-{
-	unsigned int ring_num;
-
-	for (ring_num = DIT_DST_DESC_RING_1; ring_num < DIT_DST_DESC_RING_MAX; ring_num++) {
-		if (dit_check_dst_ready(DIT_DIR_RX, ring_num) == 0)
-			return true;
-	}
-
-	return false;
-}
-
-static void dit_check_clat_enabled_internal(struct io_device *iod, void *args)
-{
-	bool *enabled = (bool *) args;
-
-	if (*enabled || !dc->ld->is_ps_ch(iod->ch))
-		return;
-
-	if (iod->clat_ndev)
-		*enabled = true;
-}
-
-static bool dit_check_clat_enabled(void)
-{
-	bool enabled = false;
-
-	if (unlikely(!dc->ld))
-		return false;
-
-	iodevs_for_each(dc->ld->msd, dit_check_clat_enabled_internal, &enabled);
-
-	return enabled;
-}
-
-static int dit_reg_backup_restore_internal(bool backup, const u16 *offset,
-	const u16 *size, void **buf, const unsigned int arr_len)
-{
-	unsigned long flags;
-	unsigned int i;
-	int ret = 0;
-
-	for (i = 0; i < arr_len; i++) {
-		if (!buf[i]) {
-			buf[i] = kvzalloc(size[i], GFP_KERNEL);
-			if (!buf[i]) {
-				ret = -ENOMEM;
-				goto exit;
-			}
-		}
-
-		spin_lock_irqsave(&dc->src_lock, flags);
-		if (dit_is_kicked_any() || !dc->init_done) {
-			ret = -EAGAIN;
-			spin_unlock_irqrestore(&dc->src_lock, flags);
-			goto exit;
-		}
-
-		if (backup)
-			BACKUP_REG_VALUE(dc, buf[i], offset[i], size[i]);
-		else
-			RESTORE_REG_VALUE(dc, buf[i], offset[i], size[i]);
-		spin_unlock_irqrestore(&dc->src_lock, flags);
-	}
-
-exit:
-	/* reset buffer if failed to backup */
-	if (unlikely(ret && backup)) {
-		for (i = 0; i < arr_len; i++) {
-			if (buf[i])
-				memset(buf[i], 0, size[i]);
-		}
-	}
-
-	return ret;
-}
-
-static int dit_reg_backup_restore(bool backup)
-{
-	/* NAT */
-	static const u16 nat_offset[] = {
-		DIT_REG_NAT_LOCAL_ADDR,
-		DIT_REG_NAT_ETHERNET_DST_MAC_ADDR_0,
-		DIT_REG_NAT_RX_PORT_TABLE_SLOT,
-	};
-	static const u16 nat_size[] = {
-		DIT_REG_NAT_LOCAL_ADDR_MAX * DIT_REG_NAT_LOCAL_INTERVAL,
-		DIT_REG_NAT_LOCAL_ADDR_MAX * DIT_REG_ETHERNET_MAC_INTERVAL,
-		DIT_REG_NAT_LOCAL_PORT_MAX * DIT_REG_NAT_LOCAL_INTERVAL,
-	};
-	static const unsigned int nat_len = ARRAY_SIZE(nat_offset);
-	static void *nat_buf[ARRAY_SIZE(nat_offset)];
-
-	/* CLAT */
-	static const u16 clat_offset[] = {
-		DIT_REG_CLAT_TX_FILTER,
-		DIT_REG_CLAT_TX_PLAT_PREFIX_0,
-		DIT_REG_CLAT_TX_CLAT_SRC_0,
-	};
-	static const u16 clat_size[] = {
-		DIT_REG_CLAT_ADDR_MAX * DIT_REG_CLAT_TX_FILTER_INTERVAL,
-		DIT_REG_CLAT_ADDR_MAX * DIT_REG_CLAT_TX_PLAT_PREFIX_INTERVAL,
-		DIT_REG_CLAT_ADDR_MAX * DIT_REG_CLAT_TX_CLAT_SRC_INTERVAL,
-	};
-	static const unsigned int clat_len = ARRAY_SIZE(clat_offset);
-	static void *clat_buf[ARRAY_SIZE(clat_offset)];
-
-	int ret = 0;
-
-	/* NAT */
-	if (dit_check_nat_enabled()) {
-		ret = dit_reg_backup_restore_internal(backup, nat_offset, nat_size, nat_buf,
-			nat_len);
-		if (ret)
-			goto error;
-	}
-
-	/* CLAT */
-	if (dit_check_clat_enabled()) {
-		ret = dit_reg_backup_restore_internal(backup, clat_offset, clat_size, clat_buf,
-			clat_len);
-		if (ret)
-			goto error;
-	}
-
-	return 0;
-
-error:
-	mif_err("backup/restore failed is_backup:%d, ret:%d\n", backup, ret);
-
-	return ret;
-}
 
 static int dit_init_hw(void)
 {
@@ -1517,10 +1372,14 @@ static int dit_init_hw(void)
 	WRITE_REG_VALUE(dc, DIT_RX_BURST_16BEAT, DIT_REG_RX_CHKSUM_CTRL);
 
 	WRITE_REG_VALUE(dc, DIT_INT_ENABLE_MASK, DIT_REG_INT_ENABLE);
-	WRITE_REG_VALUE(dc, DIT_INT_ENABLE_MASK, DIT_REG_INT_MASK);
+	WRITE_REG_VALUE(dc, DIT_INT_MASK_MASK, DIT_REG_INT_MASK);
 	WRITE_REG_VALUE(dc, DIT_ALL_INT_PENDING_MASK, DIT_REG_INT_PENDING);
 
 	WRITE_REG_VALUE(dc, 0x0, DIT_REG_CLK_GT_OFF);
+
+	DIT_INDIRECT_CALL(dc, do_init_hw);
+	if (!dc->reg_version)
+		DIT_INDIRECT_CALL(dc, get_reg_version, &dc->reg_version);
 
 	WRITE_SHR_VALUE(dc, dc->sharability_value);
 
@@ -1532,7 +1391,7 @@ static int dit_init_desc(enum dit_direction dir)
 	struct dit_desc_info *desc_info = &dc->desc_info[dir];
 	void *buf = NULL;
 	unsigned int buf_size;
-	phys_addr_t p_buf;
+	phys_addr_t p_desc;
 	int ret = 0, ring_num;
 	u32 offset_lo = 0, offset_hi = 0;
 
@@ -1547,7 +1406,7 @@ static int dit_init_desc(enum dit_direction dir)
 		desc_info->src_desc_ring = buf;
 	}
 
-	p_buf = virt_to_phys(desc_info->src_desc_ring);
+	p_desc = virt_to_phys(desc_info->src_desc_ring);
 	if (dir == DIT_DIR_TX) {
 		offset_lo = DIT_REG_TX_RING_START_ADDR_0_SRC;
 		offset_hi = DIT_REG_TX_RING_START_ADDR_1_SRC;
@@ -1555,8 +1414,8 @@ static int dit_init_desc(enum dit_direction dir)
 		offset_lo = DIT_REG_RX_RING_START_ADDR_0_SRC;
 		offset_hi = DIT_REG_RX_RING_START_ADDR_1_SRC;
 	}
-	WRITE_REG_PADDR_LO(dc, p_buf, offset_lo);
-	WRITE_REG_PADDR_HI(dc, p_buf, offset_hi);
+	WRITE_REG_PADDR_LO(dc, p_desc, offset_lo);
+	WRITE_REG_PADDR_HI(dc, p_desc, offset_hi);
 
 	if (!desc_info->src_skb_buf) {
 		buf_size = sizeof(struct sk_buff *) * desc_info->src_desc_ring_len;
@@ -1582,7 +1441,7 @@ static int dit_init_desc(enum dit_direction dir)
 			desc_info->dst_desc_ring[ring_num] = buf;
 		}
 
-		p_buf = virt_to_phys(desc_info->dst_desc_ring[ring_num]);
+		p_desc = virt_to_phys(desc_info->dst_desc_ring[ring_num]);
 		switch (ring_num) {
 		case DIT_DST_DESC_RING_0:
 			if (dir == DIT_DIR_TX) {
@@ -1626,12 +1485,14 @@ static int dit_init_desc(enum dit_direction dir)
 		}
 
 		if (offset_lo && offset_hi) {
-			WRITE_REG_PADDR_LO(dc, p_buf, offset_lo);
-			WRITE_REG_PADDR_HI(dc, p_buf, offset_hi);
+			WRITE_REG_PADDR_LO(dc, p_desc, offset_lo);
+			WRITE_REG_PADDR_HI(dc, p_desc, offset_hi);
 		}
 
 		dit_set_dst_desc_int_range(dir, ring_num);
 	}
+
+	DIT_INDIRECT_CALL(dc, do_init_desc, dir);
 
 	mif_info("dir:%d src_len:%d dst_len:%d\n",
 		dir, desc_info->src_desc_ring_len, desc_info->dst_desc_ring_len);
@@ -1663,7 +1524,9 @@ int dit_init(struct link_device *ld, enum dit_init_type type)
 	}
 
 	if (dit_is_kicked_any()) {
-		dc->init_reserved = true;
+		if (type != DIT_INIT_DEINIT)
+			dc->init_reserved = true;
+
 		spin_unlock_irqrestore(&dc->src_lock, flags);
 		return -EEXIST;
 	}
@@ -1723,38 +1586,30 @@ exit:
 }
 EXPORT_SYMBOL(dit_init);
 
-int dit_deinit(void)
-{
-	return 0;
-}
-EXPORT_SYMBOL(dit_deinit);
-
 static int dit_register_irq(struct platform_device *pdev)
 {
-	static int irq_pending_bit[] = {
-		RX_DST0_INT_PENDING_BIT, RX_DST1_INT_PENDING_BIT, RX_DST2_INT_PENDING_BIT,
-		TX_DST0_INT_PENDING_BIT, ERR_INT_PENDING_BIT};
-	static char const *irq_name[] = {
-		"DIT-RxDst0", "DIT-RxDst1", "DIT-RxDst2",
-		"DIT-Tx", "DIT-Err"};
-
 	struct device *dev = &pdev->dev;
-	int irq_len = ARRAY_SIZE(irq_pending_bit);
-	int irq_num;
 	int ret = 0;
 	int i;
 
-	dc->irq_buf = devm_kzalloc(dev, sizeof(int) * irq_len, GFP_KERNEL);
+	if (!dc->irq_len) {
+		mif_err("dit irq not defined\n");
+		return -ENODEV;
+	}
+
+	dc->irq_buf = devm_kzalloc(dev, sizeof(int) * dc->irq_len, GFP_KERNEL);
 	if (!dc->irq_buf) {
 		mif_err("dit irq buf alloc failed\n");
 		ret = -ENOMEM;
 		goto error;
 	}
 
-	for (i = 0; i < irq_len; i++) {
-		irq_num = platform_get_irq_byname(pdev, irq_name[i]);
-		ret = devm_request_irq(dev, irq_num, dit_irq_handler, 0, irq_name[i],
-				&irq_pending_bit[i]);
+	for (i = 0; i < dc->irq_len; i++) {
+		int irq_num;
+
+		irq_num = platform_get_irq_byname(pdev, dc->irq_name[i]);
+		ret = devm_request_irq(dev, irq_num, dit_irq_handler, 0, dc->irq_name[i],
+				       &dc->irq_pending_bit[i]);
 		if (ret) {
 			mif_err("failed to request irq: %d, ret: %d\n", i, ret);
 			ret = -EIO;
@@ -1762,7 +1617,6 @@ static int dit_register_irq(struct platform_device *pdev)
 		}
 		dc->irq_buf[i] = irq_num;
 	}
-	dc->irq_len = irq_len;
 
 	return 0;
 
@@ -1782,8 +1636,12 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr, ch
 	unsigned int wp, rp, desc_len;
 	unsigned int dir, ring_num;
 
-	count += scnprintf(&buf[count], PAGE_SIZE - count, "use tx: %d, rx: %d, clat: %d\n",
-		dc->use_tx, dc->use_rx, dc->use_clat);
+	count += scnprintf(&buf[count], PAGE_SIZE - count, "hw_ver:0x%08X reg_ver:0x%X\n",
+		dc->hw_version, dc->reg_version);
+	count += scnprintf(&buf[count], PAGE_SIZE - count,
+		"use tx:%d rx:%d(stop:%d) clat:%d(hal_ready:%d)\n",
+		dc->use_dir[DIT_DIR_TX], dc->use_dir[DIT_DIR_RX], dc->stop_enqueue[DIT_DIR_RX],
+		dc->use_clat, dc->clat_hal_ready);
 
 	for (dir = 0; dir < DIT_DIR_MAX; dir++) {
 		desc_info = &dc->desc_info[dir];
@@ -1983,14 +1841,14 @@ static ssize_t debug_use_tx_store(struct device *dev, struct device_attribute *a
 	if (ret)
 		return -EINVAL;
 
-	dc->use_tx = (flag > 0 ? true : false);
+	dc->use_dir[DIT_DIR_TX] = (flag > 0 ? true : false);
 	return count;
 }
 
 static ssize_t debug_use_tx_show(struct device *dev, struct device_attribute *attr,
 		char *buf)
 {
-	return scnprintf(buf, PAGE_SIZE, "use_tx: %d\n", dc->use_tx);
+	return scnprintf(buf, PAGE_SIZE, "use_tx: %d\n", dc->use_dir[DIT_DIR_TX]);
 }
 
 static ssize_t debug_use_rx_store(struct device *dev, struct device_attribute *attr,
@@ -2003,14 +1861,14 @@ static ssize_t debug_use_rx_store(struct device *dev, struct device_attribute *a
 	if (ret)
 		return -EINVAL;
 
-	dc->use_rx = (flag > 0 ? true : false);
+	dc->use_dir[DIT_DIR_RX] = (flag > 0 ? true : false);
 	return count;
 }
 
 static ssize_t debug_use_rx_show(struct device *dev, struct device_attribute *attr,
 		char *buf)
 {
-	return scnprintf(buf, PAGE_SIZE, "use_rx: %d\n", dc->use_rx);
+	return scnprintf(buf, PAGE_SIZE, "use_rx: %d\n", dc->use_dir[DIT_DIR_RX]);
 }
 
 static ssize_t debug_use_clat_store(struct device *dev, struct device_attribute *attr,
@@ -2028,7 +1886,7 @@ static ssize_t debug_use_clat_store(struct device *dev, struct device_attribute 
 	if (!flag) {
 		memset(&clat, 0, sizeof(clat));
 		for (i = 0; i < DIT_REG_CLAT_ADDR_MAX; i++) {
-			clat.rmnet_index = i;
+			clat.clat_index = i;
 			scnprintf(clat.ipv6_iface, IFNAMSIZ, "rmnet%d", i);
 			dit_hal_set_clat_info(&clat);
 		}
@@ -2044,6 +1902,26 @@ static ssize_t debug_use_clat_show(struct device *dev, struct device_attribute *
 {
 	return scnprintf(buf, PAGE_SIZE, "use_clat: %d\n", dc->use_clat);
 }
+
+static ssize_t debug_hal_support_store(struct device *dev, struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	unsigned int flag;
+	int ret;
+
+	ret = kstrtoint(buf, 0, &flag);
+	if (ret)
+		return -EINVAL;
+
+	dc->hal_support = (flag > 0 ? true : false);
+	return count;
+}
+
+static ssize_t debug_hal_support_show(struct device *dev, struct device_attribute *attr,
+				      char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "hal_support: %d\n", dc->hal_support);
+}
 #endif
 
 #if defined(DIT_DEBUG_LOW)
@@ -2056,6 +1934,7 @@ static ssize_t debug_pktgen_ch_store(struct device *dev,
 		struct device_attribute *attr,
 		const char *buf, size_t count)
 {
+	struct io_device *iod;
 	int ch;
 	int ret;
 
@@ -2065,6 +1944,16 @@ static ssize_t debug_pktgen_ch_store(struct device *dev,
 
 	dc->pktgen_ch = ch;
 
+	if (!dc->ld)
+		goto out;
+
+	iod = link_get_iod_with_channel(dc->ld, dc->pktgen_ch);
+	if (iod)
+		DIT_INDIRECT_CALL(dc, set_reg_upstream, iod->ndev);
+	else
+		DIT_INDIRECT_CALL(dc, set_reg_upstream, NULL);
+
+out:
 	return count;
 }
 
@@ -2093,6 +1982,7 @@ static DEVICE_ATTR_WO(debug_reset_usage);
 static DEVICE_ATTR_RW(debug_use_tx);
 static DEVICE_ATTR_RW(debug_use_rx);
 static DEVICE_ATTR_RW(debug_use_clat);
+static DEVICE_ATTR_RW(debug_hal_support);
 #endif
 #if defined(DIT_DEBUG_LOW)
 static DEVICE_ATTR_RW(debug_pktgen_ch);
@@ -2109,6 +1999,7 @@ static struct attribute *dit_attrs[] = {
 	&dev_attr_debug_use_tx.attr,
 	&dev_attr_debug_use_rx.attr,
 	&dev_attr_debug_use_clat.attr,
+	&dev_attr_debug_hal_support.attr,
 #endif
 #if defined(DIT_DEBUG_LOW)
 	&dev_attr_debug_pktgen_ch.attr,
@@ -2121,23 +2012,20 @@ ATTRIBUTE_GROUPS(dit);
 
 bool dit_check_dir_use_queue(enum dit_direction dir, unsigned int queue_num)
 {
+	static unsigned int target_queue[DIT_DIR_MAX] = {
+		DIT_PKTPROC_TX_QUEUE_NUM,
+		DIT_PKTPROC_RX_QUEUE_NUM};
+
 	if (!dc)
 		return false;
 
-	switch (dir) {
-	case DIT_DIR_TX:
-		if (dc->use_tx && (queue_num == DIT_PKTPROC_TX_QUEUE_NUM))
-			return true;
-		break;
-	case DIT_DIR_RX:
-		if (dc->use_rx && (queue_num == DIT_PKTPROC_RX_QUEUE_NUM))
-			return true;
-		break;
-	default:
-		break;
-	}
+	if (!dc->use_dir[dir] || queue_num != target_queue[dir])
+		return false;
 
-	return false;
+	if (dc->stop_enqueue[dir] && dit_check_queues_empty(dir))
+		return false;
+
+	return true;
 }
 EXPORT_SYMBOL(dit_check_dir_use_queue);
 
@@ -2257,7 +2145,7 @@ int dit_reset_dst_wp_rp(enum dit_direction dir)
 		return -EPERM;
 
 	desc_info = &dc->desc_info[dir];
-	for (ring_num = 0; ring_num < DIT_DST_DESC_RING_MAX; ring_num++) {
+	for (ring_num = DIT_DST_DESC_RING_0; ring_num < DIT_DST_DESC_RING_MAX; ring_num++) {
 		desc_info->dst_wp[ring_num] = 0;
 		desc_info->dst_rp[ring_num] = 0;
 		dit_set_dst_desc_int_range(dir, ring_num);
@@ -2287,23 +2175,68 @@ int dit_stop_napi_poll(void)
 }
 EXPORT_SYMBOL(dit_stop_napi_poll);
 
-static int dit_read_dt(struct device_node *np)
+bool dit_support_clat(void)
 {
-	mif_dt_read_u32(np, "dit_sharability_offset", dc->sharability_offset);
-	mif_dt_read_u32(np, "dit_sharability_value", dc->sharability_value);
+	if (!dc)
+		return false;
 
-	mif_dt_read_u32(np, "dit_hw_version", dc->hw_version);
-	mif_dt_read_u32(np, "dit_hw_capabilities", dc->hw_capabilities);
+	return dc->use_clat && dc->clat_hal_ready;
+}
+EXPORT_SYMBOL(dit_support_clat);
+
+#if IS_ENABLED(CONFIG_EXYNOS_ITMON)
+static int itmon_notifier_callback(struct notifier_block *nb,
+				   unsigned long action, void *nb_data)
+{
+	struct itmon_notifier *itmon_data = nb_data;
+
+	if (IS_ERR_OR_NULL(itmon_data))
+		return NOTIFY_DONE;
+
+	if (itmon_data->port && !strncmp("DIT", itmon_data->port, sizeof("DIT") - 1)) {
+		dit_print_dump(DIT_DIR_TX, DIT_DUMP_ALL);
+		dit_print_dump(DIT_DIR_RX, DIT_DUMP_ALL);
+		return NOTIFY_BAD;
+	}
+
+	return NOTIFY_DONE;
+}
+#endif
+
+static void dit_set_hw_specific(void)
+{
+#if defined(CONFIG_EXYNOS_DIT_VERSION)
+	dc->hw_version = CONFIG_EXYNOS_DIT_VERSION;
+#else
+	dc->hw_version = DIT_VERSION(2, 1, 0);
+#endif
+
 #if defined(CONFIG_SOC_GS101)
 	dc->hw_capabilities |= DIT_CAP_MASK_PORT_BIG_ENDIAN;
 	/* chipid: A0 = 0, B0 = 1 */
 	if (gs_chipid_get_type() >= 1)
 		dc->hw_capabilities &= ~DIT_CAP_MASK_PORT_BIG_ENDIAN;
 #endif
-	mif_dt_read_bool(np, "dit_use_tx", dc->use_tx);
-	mif_dt_read_bool(np, "dit_use_rx", dc->use_rx);
+}
+
+static int dit_read_dt(struct device_node *np)
+{
+	mif_dt_read_u32(np, "dit_sharability_offset", dc->sharability_offset);
+	mif_dt_read_u32(np, "dit_sharability_value", dc->sharability_value);
+
+	mif_dt_read_u32(np, "dit_hw_capabilities", dc->hw_capabilities);
+
+	mif_dt_read_bool(np, "dit_use_tx", dc->use_dir[DIT_DIR_TX]);
+	mif_dt_read_bool(np, "dit_use_rx", dc->use_dir[DIT_DIR_RX]);
 	mif_dt_read_bool(np, "dit_use_clat", dc->use_clat);
-	mif_dt_read_bool(np, "dit_hal_linked", dc->hal_linked);
+
+	mif_dt_read_bool(np, "dit_hal_support", dc->hal_support);
+	if (dc->hal_support) {
+		mif_dt_read_bool(np, "dit_hal_enqueue_rx", dc->hal_enqueue_rx);
+		if (dc->hal_enqueue_rx)
+			dc->stop_enqueue[DIT_DIR_RX] = true;
+	}
+
 	mif_dt_read_u32(np, "dit_rx_extra_desc_ring_len", dc->rx_extra_desc_ring_len);
 	mif_dt_read_u32(np, "dit_irq_affinity", dc->irq_affinity);
 
@@ -2315,6 +2248,9 @@ int dit_create(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
 	struct resource *res;
+#if IS_ENABLED(CONFIG_EXYNOS_ITMON)
+	struct notifier_block *itmon_nb = NULL;
+#endif
 	int ret;
 
 	if (!np) {
@@ -2352,6 +2288,14 @@ int dit_create(struct platform_device *pdev)
 		goto error;
 	}
 
+	dit_set_hw_specific();
+
+	ret = dit_ver_create(dc);
+	if (ret) {
+		mif_err("dit versioning failed\n");
+		goto error;
+	}
+
 	dma_set_mask_and_coherent(dev, DMA_BIT_MASK(36));
 
 	ret = dit_register_irq(pdev);
@@ -2379,21 +2323,32 @@ int dit_create(struct platform_device *pdev)
 	exynos_update_ip_idle_status(dc->idle_ip_index, DIT_IDLE_IP_IDLE);
 #endif
 
+#if IS_ENABLED(CONFIG_EXYNOS_ITMON)
+	itmon_nb = devm_kzalloc(dev, sizeof(struct notifier_block), GFP_KERNEL);
+	if (!itmon_nb) {
+		mif_err("itmon notifier block alloc failed\n");
+		goto error;
+	}
+
+	itmon_nb->notifier_call = itmon_notifier_callback;
+	itmon_notifier_chain_register(itmon_nb);
+#endif
+
 	ret = sysfs_create_groups(&dev->kobj, dit_groups);
 	if (ret != 0) {
 		mif_err("sysfs_create_group() error %d\n", ret);
 		goto error;
 	}
 
-	dit_hal_create(dc);
+	ret = dit_hal_create(dc);
 	if (ret) {
 		mif_err("dit hal create failed\n");
 		goto error;
 	}
 
 	mif_info("dit created. hw_ver:0x%08X, tx:%d, rx:%d, clat:%d, hal:%d, ext_len:%d, irq:%d\n",
-		dc->hw_version, dc->use_tx, dc->use_rx, dc->use_clat, dc->hal_linked,
-		dc->rx_extra_desc_ring_len, dc->irq_affinity);
+		dc->hw_version, dc->use_dir[DIT_DIR_TX], dc->use_dir[DIT_DIR_RX], dc->use_clat,
+		dc->hal_support, dc->rx_extra_desc_ring_len, dc->irq_affinity);
 
 	return 0;
 
@@ -2427,18 +2382,14 @@ static int dit_suspend(struct device *dev)
 	struct dit_ctrl_t *dc = dev_get_drvdata(dev);
 	int ret;
 
-	if (unlikely(!dc) || unlikely(!dc->ld))
-		return 0;
-
-	ret = dit_reg_backup_restore(true);
-	if (ret) {
-		mif_err("reg backup failed ret:%d\n", ret);
-		return ret;
+	if (unlikely(!dc)) {
+		mif_err_limited("dc is null\n");
+		return -EPERM;
 	}
 
-	ret = dit_init(NULL, DIT_INIT_DEINIT);
+	ret = DIT_INDIRECT_CALL(dc, do_suspend);
 	if (ret) {
-		mif_err("deinit failed ret:%d\n", ret);
+		mif_err("do_suspend failed ret:%d\n", ret);
 		return ret;
 	}
 
@@ -2448,7 +2399,6 @@ static int dit_suspend(struct device *dev)
 static int dit_resume(struct device *dev)
 {
 	struct dit_ctrl_t *dc = dev_get_drvdata(dev);
-	unsigned int dir;
 	int ret;
 
 	if (unlikely(!dc)) {
@@ -2463,19 +2413,9 @@ static int dit_resume(struct device *dev)
 
 	dit_set_irq_affinity(dc->irq_affinity);
 
-	ret = dit_init(NULL, DIT_INIT_NORMAL);
+	ret = DIT_INDIRECT_CALL(dc, do_resume);
 	if (ret) {
-		mif_err("init failed ret:%d\n", ret);
-		for (dir = 0; dir < DIT_DIR_MAX; dir++) {
-			if (dit_is_busy(dir))
-				mif_err("busy (dir:%d)\n", dir);
-		}
-		return ret;
-	}
-
-	ret = dit_reg_backup_restore(false);
-	if (ret) {
-		mif_err("reg restore failed ret:%d\n", ret);
+		mif_err("do_resume failed ret:%d\n", ret);
 		return ret;
 	}
 

@@ -14,7 +14,7 @@
 #include <linux/in6.h>
 #include <linux/inet.h>
 
-#include "dit.h"
+#include "dit_common.h"
 
 #define DIT_HAL_DEV_NAME	"dit2"
 
@@ -30,6 +30,13 @@ struct forward_stats {
 	u64 tx_bytes;
 	u64 rx_diff;
 	u64 tx_diff;
+} __packed;
+
+/* For tetheroffload hal service V1.1 */
+struct forward_limit {
+	char iface[IFNAMSIZ];
+	u64 data_warning;
+	u64 data_limit;
 } __packed;
 
 struct nat_local_addr {
@@ -61,7 +68,7 @@ struct nat_local_port {
 } __packed;
 
 struct clat_info {
-	unsigned int rmnet_index;
+	u32 clat_index;
 	char ipv6_iface[IFNAMSIZ];
 	char ipv4_iface[IFNAMSIZ];
 	struct in6_addr ipv6_local_subnet;
@@ -84,11 +91,13 @@ struct hw_info {
 #define OFFLOAD_IOCTL_SET_UPSTRM_PARAM		_IOW(OFFLOAD_IOC_MAGIC, 0x05, struct iface_info)
 #define OFFLOAD_IOCTL_ADD_DOWNSTREAM		_IOWR(OFFLOAD_IOC_MAGIC, 0x06, struct iface_info)
 #define OFFLOAD_IOCTL_REMOVE_DOWNSTRM		_IOW(OFFLOAD_IOC_MAGIC, 0x07, struct iface_info)
+#define OFFLOAD_IOCTL_SET_DATA_WARNING_LIMIT	_IOW(OFFLOAD_IOC_MAGIC, 0x08, struct forward_limit)
 
 #define OFFLOAD_IOCTL_SET_NAT_LOCAL_ADDR	_IOW(OFFLOAD_IOC_MAGIC, 0x20, struct nat_local_addr)
 #define OFFLOAD_IOCTL_SET_NAT_LOCAL_PORT	_IOW(OFFLOAD_IOC_MAGIC, 0x21, struct nat_local_port)
 
 #define OFFLOAD_IOCTL_SET_CLAT_INFO		_IOW(OFFLOAD_IOC_MAGIC, 0x40, struct clat_info)
+#define OFFLOAD_IOCTL_SET_CLAT_HAL_READY	_IOW(OFFLOAD_IOC_MAGIC, 0x41, u32)
 
 /* mandatory */
 #define OFFLOAD_IOCTL_GET_HW_INFO		_IOR(OFFLOAD_IOC_MAGIC, 0xE0, struct hw_info)
@@ -99,6 +108,7 @@ enum offload_event_num {
 	OFFLOAD_STOPPED_UNSUPPORTED	= 3,
 	OFFLOAD_SUPPORT_AVAILABLE	= 4,
 	OFFLOAD_STOPPED_LIMIT_REACHED	= 5,
+	OFFLOAD_WARNING_REACHED		= 6,
 
 	/* OEM defined event */
 	INTERNAL_OFFLOAD_STOPPED	= 5000,
@@ -125,13 +135,23 @@ struct dit_hal_dst_iface {
 	struct net_device *netdev;
 };
 
+struct dit_hal_stats {
+	char iface[IFNAMSIZ];
+	u64 data_warning;
+	u64 data_limit;
+	u64 rx_bytes;
+	u64 tx_bytes;
+	u64 rx_diff;
+	u64 tx_diff;
+};
+
 struct dit_hal_ctrl_t {
 	bool hal_enabled;
 	spinlock_t hal_lock;
 
 	struct dit_hal_dst_iface dst_iface[DIT_DST_DESC_RING_MAX];
 
-	struct forward_stats stats;
+	struct dit_hal_stats stats;
 	spinlock_t stats_lock;
 
 	enum offload_event_num last_event_num;
