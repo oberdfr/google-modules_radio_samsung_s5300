@@ -603,6 +603,9 @@ struct modem_ctl {
 	char *name;
 	struct modem_data *mdm_data;
 	struct modem_shared *msd;
+#if IS_ENABLED(CONFIG_S5910)
+	struct device *s5910_dev;
+#endif
 
 	enum modem_state phone_state;
 
