@@ -94,7 +94,7 @@ static void print_mc_state(struct modem_ctl *mc)
 
 static void pcie_clean_dislink(struct modem_ctl *mc)
 {
-#if IS_ENABLED(CONFIG_SUSPEND_DURING_VOICE_CALL)
+#if IS_ENABLED(CONFIG_CPIF_AP_SUSPEND_DURING_VOICE_CALL)
 	if (mc->pcie_voice_call_on) {
 		modem_notify_event(MODEM_EVENT_RESET, mc);
 		mc->pcie_voice_call_on = false;
@@ -244,7 +244,7 @@ static const struct attribute_group modem_group = {
 	.name = "modem",
 };
 
-#if IS_ENABLED(CONFIG_SUSPEND_DURING_VOICE_CALL)
+#if IS_ENABLED(CONFIG_CPIF_AP_SUSPEND_DURING_VOICE_CALL)
 static void voice_call_on_work(struct work_struct *work)
 {
 	struct modem_ctl *mc = container_of(work, struct modem_ctl, call_on_work);
@@ -1677,7 +1677,7 @@ int s5100_poweron_pcie(struct modem_ctl *mc, bool boot_on)
 		}
 	}
 
-#if IS_ENABLED(CONFIG_SUSPEND_DURING_VOICE_CALL)
+#if IS_ENABLED(CONFIG_CPIF_AP_SUSPEND_DURING_VOICE_CALL)
 	if (mc->pcie_voice_call_on && (mc->phone_state != STATE_CRASH_EXIT)) {
 		if (cpif_wake_lock_active(mc->ws))
 			cpif_wake_unlock(mc->ws);
@@ -1752,7 +1752,7 @@ static int suspend_cp(struct modem_ctl *mc)
 		return 0;
 
 	do {
-#if IS_ENABLED(CONFIG_SUSPEND_DURING_VOICE_CALL)
+#if IS_ENABLED(CONFIG_CPIF_AP_SUSPEND_DURING_VOICE_CALL)
 		if (mc->pcie_voice_call_on)
 			break;
 #endif
@@ -1974,7 +1974,7 @@ static int send_panic_to_cp_notifier(struct notifier_block *nb,
 	return NOTIFY_DONE;
 }
 
-#if IS_ENABLED(CONFIG_SUSPEND_DURING_VOICE_CALL)
+#if IS_ENABLED(CONFIG_CPIF_AP_SUSPEND_DURING_VOICE_CALL)
 static int s5100_call_state_notifier(struct notifier_block *nb,
 		unsigned long action, void *nb_data)
 {
@@ -2108,7 +2108,7 @@ int s5100_init_modemctl_device(struct modem_ctl *mc, struct modem_data *pdata)
 		goto err_panic_notifier;
 	}
 
-#if IS_ENABLED(CONFIG_SUSPEND_DURING_VOICE_CALL)
+#if IS_ENABLED(CONFIG_CPIF_AP_SUSPEND_DURING_VOICE_CALL)
 	INIT_WORK(&mc->call_on_work, voice_call_on_work);
 	INIT_WORK(&mc->call_off_work, voice_call_off_work);
 
@@ -2137,7 +2137,7 @@ int s5100_init_modemctl_device(struct modem_ctl *mc, struct modem_data *pdata)
 err_dev_create_file:
 	sysfs_remove_group(&pdev->dev.kobj, &modem_group);
 	sysfs_remove_group(&pdev->dev.kobj, &sim_group);
-#if IS_ENABLED(CONFIG_SUSPEND_DURING_VOICE_CALL)
+#if IS_ENABLED(CONFIG_CPIF_AP_SUSPEND_DURING_VOICE_CALL)
 	unregister_modem_voice_call_event_notifier(&mc->call_state_nb);
 err_modem_vce_notifier:
 #endif
@@ -2164,7 +2164,7 @@ void s5100_uninit_modemctl_device(struct modem_ctl *mc, struct modem_data *pdata
 	device_remove_file(dev, &dev_attr_s5100_wake_lock);
 	sysfs_remove_group(&dev->kobj, &modem_group);
 	sysfs_remove_group(&dev->kobj, &sim_group);
-#if IS_ENABLED(CONFIG_SUSPEND_DURING_VOICE_CALL)
+#if IS_ENABLED(CONFIG_CPIF_AP_SUSPEND_DURING_VOICE_CALL)
 	unregister_modem_voice_call_event_notifier(&mc->call_state_nb);
 #endif
 	atomic_notifier_chain_unregister(&panic_notifier_list, &mc->send_panic_nb);
