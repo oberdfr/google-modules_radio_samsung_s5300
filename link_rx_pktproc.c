@@ -10,7 +10,7 @@
 #include <net/ip6_checksum.h>
 #include <net/udp.h>
 #include <net/tcp.h>
-#include <soc/google/shm_ipc.h>
+#include <linux/shm_ipc.h>
 #include "modem_prj.h"
 #include "modem_utils.h"
 #include "link_device_memory.h"

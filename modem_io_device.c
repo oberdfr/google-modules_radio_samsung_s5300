@@ -20,7 +20,7 @@
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/netdevice.h>
-#include <soc/google/exynos-modem-ctrl.h>
+#include "exynos-modem-ctrl.h"
 
 #include "modem_prj.h"
 #include "modem_utils.h"

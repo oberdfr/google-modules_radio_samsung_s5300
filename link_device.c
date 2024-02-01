@@ -21,10 +21,10 @@
 #if IS_ENABLED(CONFIG_ECT)
 #include <soc/google/ect_parser.h>
 #endif
-#include <soc/google/shm_ipc.h>
-#include <soc/google/mcu_ipc.h>
+#include <linux/shm_ipc.h>
+#include "mcu_ipc.h"
 #include <soc/google/cal-if.h>
-#include <linux/modem_notifier.h>
+#include "modem_notifier.h"
 #include <linux/soc/samsung/exynos-smc.h>
 #include <trace/events/napi.h>
 #include "modem_prj.h"

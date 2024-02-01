@@ -30,7 +30,7 @@
 #include <linux/gpio.h>
 #include <linux/delay.h>
 #include <linux/bitops.h>
-#include <soc/google/exynos-modem-ctrl.h>
+#include "exynos-modem-ctrl.h"
 
 #include <soc/google/acpm_ipc_ctrl.h>
 #include "modem_prj.h"

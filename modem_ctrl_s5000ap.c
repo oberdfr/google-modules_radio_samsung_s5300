@@ -12,11 +12,11 @@
 #include <linux/delay.h>
 #include <linux/of.h>
 #include <linux/of_gpio.h>
-#include <linux/modem_notifier.h>
-#include <soc/google/mcu_ipc.h>
-#include <soc/google/shm_ipc.h>
+#include "modem_notifier.h"
+#include "mcu_ipc.h"
+#include <linux/shm_ipc.h>
 #include <soc/google/cal-if.h>
-#include <soc/google/exynos-modem-ctrl.h>
+#include "exynos-modem-ctrl.h"
 #if IS_ENABLED(CONFIG_EXYNOS_PMU_IF)
 #include <soc/google/exynos-pmu-if.h>
 #else

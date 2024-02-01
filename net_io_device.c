@@ -22,7 +22,7 @@
 #include <linux/netdevice.h>
 #include <net/tcp.h>
 
-#include <soc/google/exynos-modem-ctrl.h>
+#include "exynos-modem-ctrl.h"
 
 #include "modem_prj.h"
 #include "modem_utils.h"

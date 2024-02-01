@@ -26,8 +26,8 @@
 #include <linux/panic_notifier.h>
 
 #include <linux/exynos-pci-ctrl.h>
-#include <soc/google/shm_ipc.h>
-#include <linux/modem_notifier.h>
+#include <linux/shm_ipc.h>
+#include "modem_notifier.h"
 
 #include "modem_prj.h"
 #include "modem_utils.h"

@@ -9,7 +9,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/notifier.h>
-#include <linux/modem_notifier.h>
+#include "modem_notifier.h"
 
 #include "modem_prj.h"
 #include "modem_utils.h"

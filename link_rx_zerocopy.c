@@ -4,7 +4,7 @@
  *
  */
 
-#include <soc/google/exynos-modem-ctrl.h>
+#include "exynos-modem-ctrl.h"
 #include "modem_prj.h"
 #include "modem_utils.h"
 #include "link_device_memory.h"
