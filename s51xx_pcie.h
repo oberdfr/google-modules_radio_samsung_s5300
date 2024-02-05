@@ -59,6 +59,7 @@ extern void exynos_pcie_set_ready_cto_recovery(int ch_num);
 extern int register_separated_msi_vector(int ch_num,
 					 irq_handler_t handler, void *context,
 					 int *irq_num);
+extern int exynos_pcie_set_msi_ctrl_addr(int num, u64 msi_ctrl_addr);
 
 #define AUTOSUSPEND_TIMEOUT	200
 
