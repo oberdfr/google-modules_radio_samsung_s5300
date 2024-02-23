@@ -35,7 +35,9 @@
 #if IS_ENABLED(CONFIG_CP_PKTPROC_UL)
 #include "link_tx_pktproc.h"
 #endif
+#if IS_ENABLED(CONFIG_BOOT_DEVICE_SPI)
 #include "boot_device_spi.h"
+#endif
 #include "cpif_tp_monitor.h"
 
 /*============================================================================*/

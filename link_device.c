@@ -39,6 +39,9 @@
 #include "dit.h"
 #endif
 #include "direct_dm.h"
+#if IS_ENABLED(CONFIG_BOOT_DEVICE_SPI)
+#include "boot_device_spi.h"
+#endif
 
 #define MIF_TX_QUOTA 64
 
@@ -3635,6 +3638,7 @@ static int set_ld_attr(struct platform_device *pdev,
 		mld->spi_bus_num = -1;
 		mif_dt_read_u32_noerr(pdev->dev.of_node, "cpboot_spi_bus_num",
 				mld->spi_bus_num);
+#if IS_ENABLED(CONFIG_BOOT_DEVICE_SPI)
 		if (mld->attrs & LINK_ATTR_XMIT_BTDLR_SPI) {
 			ld->load_cp_image = cpboot_spi_load_cp_image;
 
@@ -3644,6 +3648,7 @@ static int set_ld_attr(struct platform_device *pdev,
 				goto error;
 			}
 		}
+#endif
 	} while (0);
 
 	if (mld->attrs & LINK_ATTR_MEM_DUMP)

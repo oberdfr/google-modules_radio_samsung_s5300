@@ -1571,13 +1571,13 @@ int s5100_poweron_pcie(struct modem_ctl *mc, bool boot_on)
 		exynos_pcie_set_ready_cto_recovery(mc->pcie_ch_num);
 
 	exynos_pcie_set_msi_ctrl_addr(mc->pcie_ch_num, shm_get_msi_base());
-	if (exynos_pcie_poweron(mc->pcie_ch_num, (boot_on ? 1 : 3)) != 0)
+	if (exynos_pcie_poweron(mc->pcie_ch_num, (boot_on ? 1 : 3), (boot_on ? 1 : 2)) != 0)
 		goto exit;
 
 	mc->pcie_powered_on = true;
 
 	if (mc->s51xx_pdev != NULL) {
-		s51xx_pcie_restore_state(mc->s51xx_pdev);
+		s51xx_pcie_restore_state(mc->s51xx_pdev, boot_on);
 
 		/* DBG: check MSI sfr setting values */
 		print_msi_register(mc->s51xx_pdev);
@@ -1587,7 +1587,7 @@ int s5100_poweron_pcie(struct modem_ctl *mc, bool boot_on)
 
 	set_pcie_msi_int(ld, true);
 
-	if ((mc->s51xx_pdev != NULL) && mc->pcie_registered) {
+	if ((mc->s51xx_pdev != NULL) && mc->pcie_registered && (mc->phone_state != STATE_CRASH_EXIT)) {
 		/* DBG */
 		logbuffer_log(mc->log, "DBG: doorbell: pcie_registered = %d", \
 				mc->pcie_registered);

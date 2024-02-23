@@ -233,7 +233,7 @@ void s51xx_pcie_save_state(struct pci_dev *pdev)
 		mif_err("Can't set D3 state!!!!\n");
 }
 
-void s51xx_pcie_restore_state(struct pci_dev *pdev)
+void s51xx_pcie_restore_state(struct pci_dev *pdev, bool boot_on)
 {
 	struct s51xx_pcie *s51xx_pcie = pci_get_drvdata(pdev);
 	int ret;
@@ -272,6 +272,14 @@ void s51xx_pcie_restore_state(struct pci_dev *pdev)
 
 	/* DBG: print out EP config values after restore_state */
 	s51xx_pcie_chk_ep_conf(pdev);
+
+	if (boot_on) {
+		/* Disable L1.2 after PCIe power on when booting */
+		s51xx_pcie_l1ss_ctrl(0, s51xx_pcie->pcie_channel_num);
+	} else {
+		/* Enable L1.2 after PCIe power on */
+		s51xx_pcie_l1ss_ctrl(1, s51xx_pcie->pcie_channel_num);
+	}
 
 	/* BAR0 value correction  */
 	pci_read_config_dword(pdev, PCI_BASE_ADDRESS_0, &val);
@@ -418,7 +426,6 @@ static int s51xx_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *en
 	for (i = 0; i < 6; i++) {
 		pdev->resource[i].start = 0x0;
 		pdev->resource[i].end = 0x0;
-		pdev->resource[i].flags = 0x82000000;
 		if (pci_assign_resource(pdev, i))
 			pr_warn("%s: failed to assign pci resource (i=%d)\n", __func__, i);
 	}
@@ -426,7 +433,6 @@ static int s51xx_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *en
 	/* EP BAR setup: BAR0 (4kB) */
 	pdev->resource[0].start = val;
 	pdev->resource[0].end = val + SZ_4K;
-	pdev->resource[0].flags = 0x82000000;
 	if (pci_assign_resource(pdev, 0))
 		pr_warn("%s: failed to assign EP BAR0 pci resource\n", __func__);
 

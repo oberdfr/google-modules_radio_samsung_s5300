@@ -23,7 +23,6 @@ kernel_module(
         "//private/google-modules/soc/gs:gs_soc_headers",
     ],
     outs = [
-        "boot_device_spi.ko",
         "cp_thermal_zone.ko",
         "cpif.ko",
         "cpif_page.ko",
