@@ -303,7 +303,7 @@ exit:
 static int check_link_order = 1;
 static irqreturn_t ap_wakeup_handler(int irq, void *data)
 {
-	struct modem_ctl *mc = (struct modem_ctl *)data;
+	struct modem_ctl *mc = data;
 	int gpio_val = mif_gpio_get_value(&mc->cp_gpio[CP_GPIO_CP2AP_WAKEUP], true);
 	unsigned long flags;
 
@@ -359,7 +359,7 @@ static irqreturn_t ap_wakeup_handler(int irq, void *data)
 
 static irqreturn_t cp_active_handler(int irq, void *data)
 {
-	struct modem_ctl *mc = (struct modem_ctl *)data;
+	struct modem_ctl *mc = data;
 	struct link_device *ld;
 	struct mem_link_device *mld;
 	int cp_active;
@@ -438,7 +438,7 @@ irq_done:
 #if !IS_ENABLED(CONFIG_CP_WRESET_WA)
 static irqreturn_t cp_wrst_handler(int irq, void *data)
 {
-	struct modem_ctl *mc = (struct modem_ctl *)data;
+	struct modem_ctl *mc = data;
 	int gpio_val = mif_gpio_get_value(&mc->cp_gpio[CP_GPIO_CP2AP_CP_WRST_N], true);
 
 	mif_disable_irq(&mc->cp_gpio_irq[CP_GPIO_IRQ_CP2AP_CP_WRST_N]);
@@ -462,9 +462,6 @@ static irqreturn_t cp_wrst_handler(int irq, void *data)
 static int register_cp_wrst_interrupt(struct modem_ctl *mc)
 {
 	int ret;
-
-	if (mc == NULL)
-		return -EINVAL;
 
 	if (mc->cp_gpio_irq[CP_GPIO_IRQ_CP2AP_CP_WRST_N].registered)
 		return 0;
@@ -550,7 +547,7 @@ MODULE_PARM_DESC(ds_detect, "Dual SIM detect");
 static ssize_t ds_detect_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	return scnprintf(buf, PAGE_SIZE, "%d\n", ds_detect);
+	return sysfs_emit(buf, "%d\n", ds_detect);
 }
 
 static ssize_t ds_detect_store(struct device *dev,
@@ -587,12 +584,7 @@ static ssize_t s5100_wake_lock_show(struct device *dev, struct device_attribute 
 {
 	struct modem_ctl *mc = dev_get_drvdata(dev);
 
-	if (mc->mdm_data->mif_off_during_volte) {
-		return scnprintf(buf, PAGE_SIZE, "%d, %d\n", cpif_wake_lock_active(mc->ws),
-			cpif_wake_lock_active(mc->ws_wrst));
-	} else {
-		return scnprintf(buf, PAGE_SIZE, "%d\n", cpif_wake_lock_active(mc->ws));
-	}
+	return sysfs_emit(buf, "%d\n", cpif_wake_lock_active(mc->ws));
 }
 
 static ssize_t s5100_wake_lock_store(struct device *dev, struct device_attribute *attr,
@@ -612,7 +604,33 @@ static ssize_t s5100_wake_lock_store(struct device *dev, struct device_attribute
 	return count;
 }
 
+static ssize_t s5100_wrst_wake_lock_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct modem_ctl *mc = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", cpif_wake_lock_active(mc->ws_wrst));
+}
+
+static ssize_t s5100_wrst_wake_lock_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct modem_ctl *mc = dev_get_drvdata(dev);
+	long op_num;
+
+	if (kstrtol(buf, 0, &op_num))
+		return -EINVAL;
+
+	if (op_num)
+		cpif_wake_lock(mc->ws_wrst);
+	else
+		cpif_wake_unlock(mc->ws_wrst);
+
+	return count;
+}
+
 DEVICE_ATTR_RW(s5100_wake_lock);
+DEVICE_ATTR_RW(s5100_wrst_wake_lock);
 
 static int get_ds_detect(void)
 {
@@ -1425,9 +1443,7 @@ static int complete_normal_boot(struct modem_ctl *mc)
 
 #if !IS_ENABLED(CONFIG_CP_WRESET_WA)
 	if (mc->mdm_data->mif_off_during_volte) {
-		err = register_cp_wrst_interrupt(mc);
-		if (err)
-			mif_err("Err: register_cp_wrst_interrupt:%d\n", err);
+		register_cp_wrst_interrupt(mc);
 		mif_disable_irq(&mc->cp_gpio_irq[CP_GPIO_IRQ_CP2AP_CP_WRST_N]);
 	}
 #endif
@@ -1469,8 +1485,10 @@ static int trigger_cp_crash_internal(struct modem_ctl *mc)
 		ld->crash_reason.type = CRASH_REASON_MIF_FORCED;
 	crash_type = ld->crash_reason.type;
 
-	if (strlen(ld->crash_reason.string) > 0)
-		snprintf(reason, CP_CRASH_INFO_SIZE, "Forced crash call by %s", ld->crash_reason.string);
+	if (strlen(ld->crash_reason.string) > 0) {
+		scnprintf(reason, CP_CRASH_INFO_SIZE, "Forced crash call by %s",
+				ld->crash_reason.string);
+	}
 
 
 	mif_err("+++\n");
@@ -2303,6 +2321,12 @@ int s5100_init_modemctl_device(struct modem_ctl *mc, struct modem_data *pdata)
 	ret = device_create_file(&pdev->dev, &dev_attr_s5100_wake_lock);
 	if (ret) {
 		mif_err("%s: couldn't create s5100_wake_lock(%d)\n", __func__, ret);
+		goto err_dev_create_file;
+	}
+
+	ret = device_create_file(&pdev->dev, &dev_attr_s5100_wrst_wake_lock);
+	if (ret) {
+		mif_err("%s: couldn't create s5100_wrst_wake_lock(%d)\n", __func__, ret);
 		goto err_dev_create_file;
 	}
 
